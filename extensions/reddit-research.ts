@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 const redditBaseUrl = "https://www.reddit.com";
