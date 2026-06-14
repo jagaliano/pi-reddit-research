@@ -51,7 +51,32 @@ The bundled skill teaches the model when to use `reddit_pack`, `reddit_search`, 
 
 ## Configuration
 
-Environment variables:
+### 1. JSON config (recommended)
+
+Since mid-2026, Reddit requires authentication for `.json` access. Create `~/.pi/agent/reddit-research.json`:
+
+```json
+{
+  "cookie": "reddit_session=abc123; token_v2=def456"
+}
+```
+
+Or reference a separate cookie file:
+
+```json
+{
+  "cookieFile": "/home/user/.config/pi-reddit-research/cookie.txt"
+}
+```
+
+**Advantages:**
+- No env vars to manage
+- The extension re-reads the config before requests, so you can update the cookie without restarting pi
+- `cookieFile` keeps the secret outside the JSON config and shell startup files
+
+**Security:** your Reddit cookie is a secret. Do not commit it to git or public dotfiles.
+
+### 2. Environment variables (alternative)
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -65,10 +90,46 @@ Environment variables:
 | `PI_REDDIT_TOPIC_TTL_MS` | `2592000000` | Topic-to-subreddit cache TTL. |
 | `PI_REDDIT_MAX_OUTPUT_CHARS` | `14000` | Max compact output size. |
 | `PI_REDDIT_STATUS_FOOTER` | `false` | Show "Reddit: sqlite" in the TUI footer. Set to `1`, `true`, `yes`, or `on` to enable. |
+| `PI_REDDIT_COOKIE` | — | Reddit session cookie value. Overrides config file. |
+| `PI_REDDIT_COOKIE_FILE` | — | Path to a file with the Cookie header value. Overrides config file. |
+| `PI_REDDIT_CONFIG_PATH` | `~/.pi/agent/reddit-research.json` | Path to JSON config file. |
+
+**Cookie source priority (highest to lowest):**
+1. `PI_REDDIT_COOKIE` env var
+2. `PI_REDDIT_COOKIE_FILE` env var → reads file
+3. `cookie` field in JSON config
+4. `cookieFile` field in JSON config → reads file
 
 ## Notes
 
-This extension uses Reddit's public `.json` endpoints and local SQLite caching. Treat Reddit posts and comments as anecdotal evidence, not verified facts.
+This extension uses Reddit's `.json` endpoints with local SQLite caching. **Since mid-2026, Reddit requires authentication for `.json` access.** Set your cookie in `~/.pi/agent/reddit-research.json`, via `cookieFile`, or via env vars to restore functionality.
+
+Treat Reddit posts and comments as anecdotal evidence, not verified facts.
+
+### How to get your Reddit cookie
+
+1. Open a **private/incognito** browser window (to avoid unrelated cookies).
+2. Go to https://www.reddit.com/login and sign in.
+3. F12 → Application → Cookies → `reddit.com`.
+4. **Method A (full Cookie header):** Click any cookie → Ctrl+A → Ctrl+C, then pick "Copy as string" (Chrome) or paste into an editor and join with `; `.
+5. **Method B (only `reddit_session`):** Copy the value of the `reddit_session` cookie and use:
+
+   ```bash
+   # Via config file:
+   echo '{"cookie": "reddit_session=YOUR_VALUE"}' > ~/.pi/agent/reddit-research.json
+
+   # Or keep the secret in a separate file:
+   mkdir -p ~/.config/pi-reddit-research
+   printf '%s\n' 'reddit_session=YOUR_VALUE' > ~/.config/pi-reddit-research/cookie.txt
+   printf '{"cookieFile":"%s/.config/pi-reddit-research/cookie.txt"}\n' "$HOME" > ~/.pi/agent/reddit-research.json
+
+   # Or via env:
+   export PI_REDDIT_COOKIE="reddit_session=YOUR_VALUE"
+   ```
+
+**Important:** Avoid cookies with JSON values (like `g_state={"i_l":1,...}`) — they break the JSON config file. If you copy the full Cookie header, remove entries like `g_state`, `eu_cookie`, and `seeker_session`. Only `reddit_session` and `token_v2` are needed for authentication.
+
+The cookie expires after a few days. When that happens, just update it in the config or cookie file — pi will pick up the change automatically.
 
 ## License
 

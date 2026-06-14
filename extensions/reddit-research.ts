@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -11,6 +11,52 @@ const sqlitePath = process.env.PI_REDDIT_SQLITE_PATH ?? join(cacheDir, "reddit.s
 const userAgent =
 	process.env.PI_REDDIT_USER_AGENT ??
 	"pi-reddit-research/0.1 personal-use (https://www.reddit.com/.json)";
+
+// Reddit session cookie support.
+// Priority: PI_REDDIT_COOKIE env > PI_REDDIT_COOKIE_FILE env > "cookie" in config.json > "cookieFile" in config.json
+const redditConfigPath =
+	process.env.PI_REDDIT_CONFIG_PATH ??
+	join(homedir(), ".pi", "agent", "reddit-research.json");
+
+interface RedditConfig {
+	cookie?: string;
+	cookieFile?: string;
+}
+
+function readRedditConfig(): RedditConfig | undefined {
+	try {
+		const raw = readFileSync(redditConfigPath, "utf-8").trim();
+		if (!raw) return undefined;
+		return JSON.parse(raw) as RedditConfig;
+	} catch {
+		return undefined;
+	}
+}
+
+function loadRedditCookie(): string | undefined {
+	// env vars always win (and don't stale)
+	if (process.env.PI_REDDIT_COOKIE) return process.env.PI_REDDIT_COOKIE;
+	if (process.env.PI_REDDIT_COOKIE_FILE) {
+		try {
+			return readFileSync(process.env.PI_REDDIT_COOKIE_FILE, "utf-8").trim();
+		} catch {
+			return undefined;
+		}
+	}
+	// config file — re-read every time when asked (enables updating cookie without restart)
+	const config = readRedditConfig();
+	if (config?.cookie) return config.cookie;
+	if (config?.cookieFile) {
+		try {
+			return readFileSync(config.cookieFile, "utf-8").trim();
+		} catch {
+			return undefined;
+		}
+	}
+	return undefined;
+}
+
+let redditCookie = loadRedditCookie();
 
 const requestDelayMs = Math.max(250, Number(process.env.PI_REDDIT_DELAY_MS ?? 1200));
 const defaultTtlMs = Math.max(30_000, Number(process.env.PI_REDDIT_CACHE_TTL_MS ?? 60 * 60_000));
@@ -555,23 +601,41 @@ class RedditRequestQueue {
 		const waitMs = lastRequestAt + requestDelayMs - Date.now();
 		if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
 		lastRequestAt = Date.now();
+		redditCookie = loadRedditCookie();
 
+		const headers: Record<string, string> = {
+			"user-agent": userAgent,
+			accept: "application/json,text/plain,*/*",
+			"accept-language": "en-US,en;q=0.9",
+		};
+		if (redditCookie) {
+			headers["cookie"] = redditCookie;
+		}
 		const response = await fetch(url, {
 			signal,
-			headers: {
-				"user-agent": userAgent,
-				accept: "application/json,text/plain,*/*",
-				"accept-language": "en-US,en;q=0.9",
-			},
+			headers,
 			redirect: "follow",
 		});
 
 		if (response.status === 403 || response.status === 429) {
+			// Forbidden: try refreshing the cookie from config in case it was updated
+			if (response.status === 403) {
+				const previousCookie = redditCookie;
+				redditCookie = loadRedditCookie();
+				if (redditCookie && redditCookie !== previousCookie) {
+					// Cookie was refreshed in config — don't set cooldown, agent will retry
+					store.saveRequest(url, response.status, ttlMs, undefined, "Reddit 403; cookie refreshed from config, retrying...");
+					throw new Error("Reddit JSON HTTP 403; cookie refreshed from config — retry the request.");
+				}
+			}
 			setCooldownFromResponse(response);
 			const stale = store.getRequest(url, true);
 			if (stale !== undefined) return stale;
+			const cookieHint = !redditCookie
+				? " Reddit no longer serves .json to unauthenticated clients. Set a cookie in ~/.pi/agent/reddit-research.json, or use PI_REDDIT_COOKIE env var."
+				: " Your Reddit session cookie may be expired. Update it in your config and retry.";
 			store.saveRequest(url, response.status, ttlMs, undefined, `Reddit JSON HTTP ${response.status}; cooldown started.`);
-			throw new Error(`Reddit JSON HTTP ${response.status}; cooldown started.`);
+			throw new Error(`Reddit JSON HTTP ${response.status}; cooldown started.${cookieHint}`);
 		}
 		if (!response.ok) {
 			const text = await response.text();
@@ -1195,12 +1259,13 @@ export default function redditResearch(pi: ExtensionAPI) {
 	pi.registerCommand("reddit", {
 		description: "Search Reddit JSON quickly",
 		handler: async (args, ctx) => {
-			const [subcommand, ...rest] = args.trim().split(/\s+/);
 			try {
+				const [subcommand, ...rest] = String(args ?? "").trim().split(/\s+/);
 				if (!subcommand || subcommand === "status") {
+					redditCookie = loadRedditCookie();
 					const cooldownMs = Math.max(0, cooldownUntil - Date.now());
 					ctx.ui.notify(
-						`Reddit research ready. SQLite: ${sqlitePath}. Delay: ${requestDelayMs}ms. TTLs: search ${Math.round(defaultTtlMs / 60_000)}m, thread ${Math.round(threadTtlMs / 60_000)}m, subreddit ${Math.round(subredditTtlMs / 3_600_000)}h, topic ${Math.round(topicTtlMs / 86_400_000)}d. Cooldown: ${Math.ceil(cooldownMs / 1000)}s.`,
+						`Reddit research ready. SQLite: ${sqlitePath}. Delay: ${requestDelayMs}ms. TTLs: search ${Math.round(defaultTtlMs / 60_000)}m, thread ${Math.round(threadTtlMs / 60_000)}m, subreddit ${Math.round(subredditTtlMs / 3_600_000)}h, topic ${Math.round(topicTtlMs / 86_400_000)}d. Cooldown: ${Math.ceil(cooldownMs / 1000)}s. Cookies: ${redditCookie ? "set" : "not set — create ~/.pi/agent/reddit-research.json or set PI_REDDIT_COOKIE"}. Config: ${redditConfigPath}.`,
 						"info",
 					);
 					return;
