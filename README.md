@@ -11,6 +11,7 @@ Registers these pi tools:
 - `reddit_pack` — build a compact evidence pack from posts and top comments.
 - `reddit_search` — search Reddit posts without fetching full comment threads.
 - `reddit_thread` — fetch one thread and top comments.
+- `reddit_user` — check a public account: age, karma, account signals, recent posts and comments.
 - `reddit_subreddits` — raw subreddit search.
 - `reddit_trends` — inspect hot/top/new posts in one or more subreddits.
 
@@ -46,8 +47,38 @@ Ask pi questions like:
 - "What does Reddit think about Claude Code vs OpenCode?"
 - "Find Reddit fixes for this error: ..."
 - "What settings do ComfyUI users recommend for ...?"
+- "That comment says Ollama needs 40 GB VRAM — is that account credible?"
+- "What else has u/foo said about this tool?"
 
-The bundled skill teaches the model when to use `reddit_pack`, `reddit_search`, `reddit_thread`, and related tools.
+The bundled skill teaches the model when to use `reddit_pack`, `reddit_search`, `reddit_thread`, `reddit_user`, and related tools.
+
+### Pagination
+
+Listing tools return a `next page: pass after=...` line when Reddit supplied a cursor. Pass that value back as `after` with the same query/scope/sort/time (and the same `username` for `reddit_user`) to fetch the next page:
+
+```
+reddit_search(query: "ollama vram", subreddits: "ollama", limit: 10)     -> next page: pass after=t3_abc123
+reddit_search(query: "ollama vram", subreddits: "ollama", limit: 10, after: "t3_abc123")
+```
+
+Rules the code enforces, because Reddit does not error on a bad cursor (it answers HTTP 200 with the *same page and the same cursor* again, which looks like progress but is not):
+
+- Reddit cursors belong to a single listing. `reddit_search` and `reddit_trends` therefore expose a single `after` only for a single-subreddit scope (search also supports the all-Reddit scope). Passing `after` together with several subreddits is **ignored** and reported in the output; per-subreddit cursors are in tool details under `cursors.per_subreddit`.
+- `reddit_user` uses two cursors, because a post listing and a comment listing have different cursor types: use `after_posts` (from `more posts: pass after_posts=t3_...`) and `after_comments` (from `more comments: pass after_comments=t1_...`). A cursor sent to the wrong listing is rejected with a `fetch errors` note instead of silently repeating page one.
+
+### Account checks
+
+`reddit_user` fetches `/user/<name>/about.json`, `/submitted.json`, and `/comments.json`:
+
+```
+reddit_user(username: "u/foo", sections: "about,posts", limit: 10)
+reddit_user(username: "https://www.reddit.com/user/foo/comments/", sections: "comments", limit: 25)
+reddit_user(username: "foo", sections: "comments", limit: 25, after_comments: "t1_xyz789")
+```
+
+Sections are comma-separated (`about`, `posts`, `comments`), default `about,posts`. The `limit` applies to posts and comments alike. Account age and karma are weak signals, not proof of expertise.
+
+Partial failures never abort the call: a suspended, deleted, private, or misspelled account produces whatever sections did resolve plus a `fetch errors` line. A string that cannot be a Reddit username at all (over 20 characters, shorter than a real username, or containing characters other than letters, digits, `_`, `-`) is rejected with a specific `Reddit usernames are at most 20 characters` / `too short` / `not a valid Reddit username` error instead of a pointless request. Because Reddit answers `/user/<name>/about.json` with HTTP 200 for banned and suspended accounts (no `is_suspended` flag), the tool reports `no public profile page for this account` when Reddit returns no profile object.
 
 ## Configuration
 
