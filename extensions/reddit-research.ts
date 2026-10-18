@@ -610,17 +610,17 @@ function parseJsonArray(value: unknown): string[] {
 class RedditRequestQueue {
 	private tail: Promise<unknown> = Promise.resolve();
 
-	async fetchJson(path: string, ttlMs = defaultTtlMs, signal?: AbortSignal, onFetch?: () => void) {
+	async fetchJson(path: string, ttlMs = defaultTtlMs, signal?: AbortSignal, onFetch?: () => void, indexPayload = true) {
 		const url = normalizeRequestUrl(path);
 		const fresh = store.getRequest(url);
 		if (fresh !== undefined) return fresh;
 
-		const task = this.tail.then(() => this.fetchNow(url, ttlMs, signal, onFetch));
+		const task = this.tail.then(() => this.fetchNow(url, ttlMs, signal, onFetch, indexPayload));
 		this.tail = task.catch(() => undefined);
 		return task;
 	}
 
-	private async fetchNow(url: string, ttlMs: number, signal?: AbortSignal, onFetch?: () => void) {
+	private async fetchNow(url: string, ttlMs: number, signal?: AbortSignal, onFetch?: () => void, indexPayload = true) {
 		const fresh = store.getRequest(url);
 		if (fresh !== undefined) return fresh;
 
@@ -700,15 +700,15 @@ class RedditRequestQueue {
 
 		const data = await response.json();
 		store.saveRequest(url, response.status, ttlMs, data);
-		indexRedditPayload(data);
+		if (indexPayload) indexRedditPayload(data);
 		return data;
 	}
 }
 
 const requestQueue = new RedditRequestQueue();
 
-async function fetchRedditJson(path: string, ttlMs = defaultTtlMs, signal?: AbortSignal, onFetch?: () => void) {
-	return requestQueue.fetchJson(path, ttlMs, signal, onFetch);
+async function fetchRedditJson(path: string, ttlMs = defaultTtlMs, signal?: AbortSignal, onFetch?: () => void, indexPayload = true) {
+	return requestQueue.fetchJson(path, ttlMs, signal, onFetch, indexPayload);
 }
 
 function listingChildren(data: unknown) {
@@ -1102,7 +1102,8 @@ async function expandMore(thread: ReturnType<typeof parseThread>, sort: RedditSo
 			const path = `/api/morechildren.json?api_type=json&link_id=t3_${encodeURIComponent(thread.post.id)}&children=${encodeURIComponent(batch.join(","))}&sort=${encodeURIComponent(commentsSort)}`;
 			// Cached/stale responses do not spend the HTTP budget. Track the fetch boundary,
 			// not helper invocations; attempted ids still prevent cached empty-response loops.
-			const payload = await fetchRedditJson(path, threadTtlMs, signal, () => { requests++; });
+			// Validate the expansion envelope before updating any indexed evidence.
+			const payload = await fetchRedditJson(path, threadTtlMs, signal, () => { requests++; }, false);
 			const json = (payload as JsonObject | null)?.json as JsonObject | undefined;
 			const data = json?.data as JsonObject | undefined;
 			if (!json || !Array.isArray(json.errors)) throw new Error("Malformed Reddit comment expansion response.");

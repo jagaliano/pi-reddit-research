@@ -508,6 +508,23 @@ test('continue-thread-only and fully loaded threads do not spend an expansion bu
   assert.equal(expansionRequests(before).length, 0);
 });
 
+test('malformed child batches cannot overwrite indexed ownership before rejection', async () => {
+  respond = (url) => url.pathname === '/api/morechildren.json'
+    ? ok(threadPayload('wrongidx', [comment('indexpar'), comment('foreignxx')]))
+    : ok(threadPayload('indexok', [comment('indexpar'), more(['indexkid'])]));
+  const result = await call('reddit_thread', { url_or_id: 'indexok', expand_more: 1 });
+  assert.ok(result.details.expansion_stopped);
+  assert.equal(result.details.comments_fetched, 1);
+  assert.equal(result.details.expansion.requests, 1);
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(join(cache, 'reddit.sqlite'));
+  try {
+    assert.equal(db.prepare('SELECT post_id FROM comments WHERE id = ?').get('indexpar').post_id, 'indexok');
+    assert.equal(db.prepare('SELECT id FROM comments WHERE id = ?').get('foreignxx'), undefined);
+    assert.equal(db.prepare('SELECT id FROM posts WHERE id = ?').get('wrongidx'), undefined);
+  } finally { db.close(); }
+});
+
 test('cancelling expansion keeps the fetched thread and does not fetch another batch', async () => {
   const controller = new AbortController();
   respond = (url) => {
