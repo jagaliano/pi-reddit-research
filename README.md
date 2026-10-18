@@ -10,7 +10,7 @@ Registers these pi tools:
 - `reddit_resolve_subreddits` — find and rank subreddit candidates for a topic.
 - `reddit_pack` — build a compact evidence pack from posts and top comments.
 - `reddit_search` — search Reddit posts without fetching full comment threads.
-- `reddit_thread` — fetch one thread and top comments.
+- `reddit_thread` — fetch one thread and top comments, report collapsed branches, and optionally expand hidden comments within a request budget.
 - `reddit_user` — check a public account: age, karma, account signals, recent posts and comments.
 - `reddit_subreddits` — raw subreddit search.
 - `reddit_trends` — inspect hot/top/new/rising/controversial posts in subreddits, including `all` and `popular`.
@@ -67,6 +67,21 @@ reddit_trends(subreddits: "popular", listing: "new", order: "reddit")
 - `order: "ranked"` uses the extension's local relevance/engagement ranking. Defaults remain `ranked` for `hot|top|new`; the new `rising|controversial` listings default to `reddit`. Either can be overridden explicitly.
 - `all` and `popular` use the existing subreddit listing path, not your personalized home feed. Reddit may filter their results; do not treat either as exhaustive.
 - Pagination works as before; reuse the same listing, scope, time **and order**.
+
+### Thread completeness and comment expansion
+
+```
+reddit_thread(url_or_id: "POST_ID", comment_limit: 500)
+reddit_thread(url_or_id: "POST_ID", comment_limit: 50, expand_more: 2, top_comments: 20)
+```
+
+- `comment_limit` keeps its default of 50 and now accepts up to 500. A large response can transfer about 1 MB; `top_comments` still controls compact output (default 12, max 40). `details.comments_fetched` counts the visible, non-deleted comments parsed before that output selection.
+- With the default limit and `expand_more=0`, no extra requests are made. Raising `comment_limit` can increase response size. Collapsed placeholders are no longer silently discarded: a reserved `not loaded:` footer reports unique known hidden ids, collapsed branches and continue-thread stubs, even if the evidence text is truncated. `details.more` contains the remaining `nodes`, unique `hiddenIds` count and `stubs` count.
+- `expand_more` is an opt-in **extra HTTP request budget**, default 0, max 5. It requests at most 100 child ids per batch, favors shallow/larger branches, follows newly returned placeholders and deduplicates comments. Reddit may return additional descendants alongside those requested ids. It uses the same comment sort, request queue, authentication and thread cache. At the default queue delay, five uncached requests add roughly six seconds of spacing, plus network time.
+- Cached or stale expansion responses do not spend the HTTP budget; the summary reports actual fetch attempts, not helper calls. Cache reuse can therefore add comments with zero new HTTP requests. Repeating a request reconstructs the result from the cached initial thread and available expansion batches; it is not a persisted expansion cursor.
+- `details.expansion` reports `comments_added`, `requests`, `pending_ids` (known ids not yet attempted), `unresolved_ids` (attempted but no visible comment returned) and `stubs`. These id counts are **lower bounds**, not an exact unseen-comment total: one collapsed id can hide a subtree.
+- If expansion fails or is cancelled, already loaded evidence is kept and `details.expansion_stopped` and the compact footer explain why. This is a partial result, not proof that the thread was fully read.
+- Continue-thread stubs are counted but **not expanded** in this change. `reddit_pack` does not opt into expansion; its output and request behavior stay unchanged.
 
 ### Pagination
 
@@ -193,7 +208,7 @@ npm run smoke:live
 
 `npm run check` performs strict TypeScript checking and offline regression tests. Tests load the extension with Pi's actual loader, invoke its tools through Pi's agent loop (including argument preparation and validation), and exercise the default TUI renderer. Reddit HTTP responses and the model stream are synthetic in these tests.
 
-`npm run smoke:live` uses real Reddit HTTP with your existing cookie configuration, a fresh temporary SQLite cache, and the same Pi loader/agent loop. Only the model stream is synthetic; no LLM provider is called. It checks all eight tools, smoke-checks rising/controversial and the all/popular feeds, and verifies that page two does not overlap page one for search, trends, user posts, and user comments when Reddit supplies cursors. The temporary cache is removed when finished; credentials are never printed. It exits nonzero on HTTP errors, partial user-section errors, or failed assertions.
+`npm run smoke:live` uses real Reddit HTTP with your existing cookie configuration, a fresh temporary SQLite cache, and the same Pi loader/agent loop. Only the model stream is synthetic; no LLM provider is called. It checks all eight tools, smoke-checks rising/controversial and the all/popular feeds, exercises budgeted comment expansion and a 500-comment fetch, and verifies that page two does not overlap page one for search, trends, user posts, and user comments when Reddit supplies cursors. The temporary cache is removed when finished; credentials are never printed. It exits nonzero on HTTP errors, partial user-section errors, stopped comment expansions, or failed assertions.
 
 Before publishing, run `npm run check`, `npm run smoke:live`, and `npm pack --dry-run`. Existing releases use a package version commit and an annotated `v<version>` tag. Tag and publish the approved integration commit, then verify the npm version, dist tag, `gitHead`, and tarball contents.
 
