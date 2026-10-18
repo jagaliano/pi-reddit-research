@@ -1086,23 +1086,32 @@ function parseContinuation(payload: unknown, thread: ReturnType<typeof parseThre
 		throw new Error("Malformed or mismatched Reddit continuation response.");
 	}
 	const roots = listing.children as JsonObject[];
-	const rawComments = new Map<string, { parentId?: string; depth: number }>();
+	const rawComments = new Map<string, { parentId?: string; depth: number; explicitDepth?: number }>();
+	const explicitMore: { parentId: string; depth: number }[] = [];
 	const visit = (children: JsonObject[], depth = 0, parentId?: string) => {
 		for (const item of children) {
 			if (!item || !["t1", "more"].includes(String(item.kind)) || !item.data || typeof item.data !== "object" || Array.isArray(item.data)) {
 				throw new Error("Malformed Reddit continuation response.");
 			}
 			const data = item.data as JsonObject;
+			const explicitDepth = typeof data.depth === "number" && Number.isInteger(data.depth) && data.depth >= 0 ? data.depth : undefined;
 			if (item.kind === "more") {
 				if (!Array.isArray(data.children)) throw new Error("Malformed Reddit continuation response.");
+				if (explicitDepth !== undefined) explicitMore.push({ parentId: optionalString(data.parent_id) ?? parentId ?? "", depth: explicitDepth });
 				continue;
 			}
 			const id = optionalString(data.id)?.replace(/^t1_/, "");
 			if (!id) throw new Error("Malformed Reddit continuation response.");
-			const nodeDepth = typeof data.depth === "number" && Number.isInteger(data.depth) && data.depth >= 0 ? data.depth : depth;
-			rawComments.set(id, { parentId: optionalString(data.parent_id) ?? parentId, depth: nodeDepth });
-			const replies = ((data.replies as JsonObject | undefined)?.data as JsonObject | undefined)?.children;
-			if (Array.isArray(replies)) visit(replies as JsonObject[], nodeDepth + 1, `t1_${id}`);
+			const nodeDepth = explicitDepth ?? depth;
+			rawComments.set(id, { parentId: optionalString(data.parent_id) ?? parentId, depth: nodeDepth, explicitDepth });
+			if (data.replies !== undefined && data.replies !== "") {
+				const replies = data.replies as JsonObject | null;
+				const listing = replies?.data as JsonObject | null | undefined;
+				if (!replies || typeof replies !== "object" || Array.isArray(replies) || !listing || typeof listing !== "object" || Array.isArray(listing) || !Array.isArray(listing.children)) {
+					throw new Error("Malformed Reddit continuation replies.");
+				}
+				visit(listing.children as JsonObject[], nodeDepth + 1, `t1_${id}`);
+			}
 		}
 	};
 	visit(roots);
@@ -1110,6 +1119,7 @@ function parseContinuation(payload: unknown, thread: ReturnType<typeof parseThre
 	const parent = stub.parentId.slice(3);
 	const parentDepth = thread.comments.find((comment) => comment.id === parent)?.depth ?? Math.max(0, stub.depth - 1);
 	const reachable = new Set([stub.parentId]);
+	const distances = new Map([[stub.parentId, 0]]);
 	let changed = true;
 	while (changed) {
 		changed = false;
@@ -1117,6 +1127,7 @@ function parseContinuation(payload: unknown, thread: ReturnType<typeof parseThre
 			const fullname = `t1_${id}`;
 			if (comment.parentId && reachable.has(comment.parentId) && !reachable.has(fullname)) {
 				reachable.add(fullname);
+				distances.set(fullname, distances.get(comment.parentId)! + 1);
 				changed = true;
 			}
 		}
@@ -1125,9 +1136,19 @@ function parseContinuation(payload: unknown, thread: ReturnType<typeof parseThre
 	const more = parsed.more.filter((node) => reachable.has(node.parentId));
 	const rawAnchor = rawComments.get(parent);
 	if (roots.length && !comments.length && !more.length && !rawAnchor) throw new Error("Reddit continuation response did not contain the requested branch.");
-	const anchorDepth = rawAnchor?.depth;
+	const anchorDepth = rawAnchor?.explicitDepth;
+	// An inferred anchor zero must not shift descendants with usable absolute depths.
+	const explicitFrames = [...rawComments].flatMap(([id, comment]) => id !== parent && comment.explicitDepth !== undefined && distances.has(`t1_${id}`)
+		? [{ depth: comment.explicitDepth, distance: distances.get(`t1_${id}`)! }] : []);
+	for (const node of explicitMore) {
+		if (distances.has(node.parentId)) explicitFrames.push({ depth: node.depth, distance: distances.get(node.parentId)! + 1 });
+	}
+	const nearestExplicit = explicitFrames.sort((a, b) => a.distance - b.distance)[0];
+	const inferredAnchor = nearestExplicit ? nearestExplicit.depth - nearestExplicit.distance : undefined;
 	const direct = comments.filter((comment) => comment.parentId === stub.parentId);
 	const offset = anchorDepth !== undefined ? parentDepth - anchorDepth
+		: inferredAnchor !== undefined ? Math.max(0, parentDepth - inferredAnchor)
+		: rawAnchor ? parentDepth - rawAnchor.depth
 		: Math.max(0, parentDepth + 1 - Math.min(...(direct.length ? direct.map((comment) => comment.depth) : more.map((node) => node.depth)), parentDepth + 1));
 	// Keep deleted ancestors in the depth graph even though their bodies are omitted.
 	const depths = new Map<string, number>([[stub.parentId, parentDepth]]);
@@ -1179,8 +1200,8 @@ async function expandMore(thread: ReturnType<typeof parseThread>, sort: RedditSo
 				: `/api/morechildren.json?api_type=json&link_id=t3_${encodeURIComponent(thread.post.id)}&children=${encodeURIComponent(batch.join(","))}&sort=${encodeURIComponent(commentsSort)}`;
 			// Both endpoints share the actual-fetch budget. Cache hits and attempted-parent
 			// tracking allow useful replay without spending HTTP or repeating empty stubs.
-			// A continuation is indexed only after its post/branch validation and merge.
-			const payload = await fetchRedditJson(path, threadTtlMs, signal, () => { requests++; }, !stub);
+			// Both expansion envelopes are validated before any indexed evidence update.
+			const payload = await fetchRedditJson(path, threadTtlMs, signal, () => { requests++; }, false);
 			let parsed: ReturnType<typeof parseCommentTree>;
 			if (stub) {
 				const continued = parseContinuation(payload, thread, stub);

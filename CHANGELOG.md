@@ -11,8 +11,9 @@
 
 ### Fixed
 
-- Rebase continuation subtree depths against known parents when Reddit resets or omits depth information. Preserve surviving descendants of deleted ancestors and avoid duplicate parent comments.
-- Validate continuation post/branch identity before updating indexed evidence, preventing malformed or wrong-post responses from overwriting existing comment ownership. Preserve already loaded evidence on failures or cancellation.
+- Rebase continuation subtree depths against known parents when Reddit resets or omits depth information. Distinguish inferred depths from explicit comment/hidden-branch depths, preserving usable absolute depths even when ancestor depths are absent or bodies deleted.
+- Reject malformed continuation reply containers without clearing unresolved stubs; retain valid empty replies and Reddit's empty-string sentinel.
+- Validate both child-batch and continuation envelopes before updating indexed evidence, preventing malformed or wrong-post responses from overwriting existing comment ownership. Preserve already loaded evidence on failures or cancellation.
 
 ### Notes
 

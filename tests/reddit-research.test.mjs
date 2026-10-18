@@ -518,6 +518,23 @@ test('empty continuation is attempted once and stays unresolved; fully loaded th
   assert.equal(expansionRequests(before).length, 0);
 });
 
+test('malformed child batches cannot overwrite indexed ownership before rejection', async () => {
+  respond = (url) => url.pathname === '/api/morechildren.json'
+    ? ok(threadPayload('wrongidx', [comment('indexpar'), comment('foreignxx')]))
+    : ok(threadPayload('indexok', [comment('indexpar'), more(['indexkid'])]));
+  const result = await call('reddit_thread', { url_or_id: 'indexok', expand_more: 1 });
+  assert.ok(result.details.expansion_stopped);
+  assert.equal(result.details.comments_fetched, 1);
+  assert.equal(result.details.expansion.requests, 1);
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(join(cache, 'reddit.sqlite'));
+  try {
+    assert.equal(db.prepare('SELECT post_id FROM comments WHERE id = ?').get('indexpar').post_id, 'indexok');
+    assert.equal(db.prepare('SELECT id FROM comments WHERE id = ?').get('foreignxx'), undefined);
+    assert.equal(db.prepare('SELECT id FROM posts WHERE id = ?').get('wrongidx'), undefined);
+  } finally { db.close(); }
+});
+
 test('cancelling expansion keeps the fetched thread and does not fetch another batch', async () => {
   const controller = new AbortController();
   respond = (url) => {
@@ -541,7 +558,7 @@ const deepComment = (id, parent, depth, body) => {
   return child;
 };
 
-for (const [index, mode] of ['relative', 'absolute', 'omitted', 'parent-omitted', 'absolute-parent-omitted'].entries()) {
+for (const [index, mode] of ['relative', 'absolute', 'omitted', 'parent-omitted', 'absolute-parent-omitted', 'absolute-anchor-depth-omitted', 'absolute-anchor-child-depth-omitted', 'relative-anchor-depth-omitted', 'relative-anchor-child-depth-omitted'].entries()) {
   test(`continuation ${mode} depths remain below the known depth-5 parent`, async () => {
     const id = `depth${index}0`, parent = `par${index}abc`, kid = `kid${index}abc`, grand = `grn${index}abc`, tail = `tail${index}ab`;
     respond = (url) => {
@@ -554,6 +571,8 @@ for (const [index, mode] of ['relative', 'absolute', 'omitted', 'parent-omitted'
       child.data.replies = listing([leaf, hidden]);
       root.data.replies = listing([child]);
       if (mode === 'omitted') for (const item of [root, child, leaf, hidden]) delete item.data.depth;
+      if (mode.includes('anchor')) delete root.data.depth;
+      if (mode.includes('child-depth')) delete child.data.depth;
       return ok(threadPayload(id, mode.includes('parent-omitted') ? [child] : [root]));
     };
     const before = requests.length;
@@ -605,6 +624,66 @@ test('deleted continuation ancestors do not hide surviving descendants or reset 
   assert.equal(result.details.comments.some((c) => c.id === 'delmid'), false);
   assert.equal(result.details.more.stubs, 0);
 });
+
+test('absolute descendant depth survives missing depths on deleted continuation ancestors', async () => {
+  respond = (url) => {
+    if (!url.pathname.includes('/_/')) return ok(threadPayload('delmix1', [deepComment('delmixp', 't1_above00', 5), more([], 't1_delmixp', 6)]));
+    const root = deepComment('delmixp', 't1_above00', undefined, '[removed]');
+    const middle = deepComment('delmixm', 't1_delmixp', undefined, '[deleted]');
+    middle.data.replies = listing([deepComment('delmixk', 't1_delmixm', 7)]);
+    root.data.replies = listing([middle]);
+    return ok(threadPayload('delmix1', [root]));
+  };
+  const result = await call('reddit_thread', { url_or_id: 'delmix1', expand_more: 1 });
+  assert.equal(result.details.comments.find((c) => c.id === 'delmixk').depth, 7);
+  assert.equal(result.details.expansion.stubs_resolved, 1);
+});
+
+for (const [index, depth] of [6, 1].entries()) {
+  test(`explicit hidden-branch depth ${depth} survives an inferred anchor depth`, async () => {
+    const id = `moremix${index}`;
+    respond = (url) => {
+      if (!url.pathname.includes('/_/')) return ok(threadPayload(id, [deepComment('moremixp', `t3_${id}`, 5), more([], 't1_moremixp', 6)]));
+      const root = deepComment('moremixp', `t3_${id}`, undefined);
+      root.data.replies = listing([more(['moremixk'], 't1_moremixp', depth)]);
+      return ok(threadPayload(id, [root]));
+    };
+    const result = await call('reddit_thread', { url_or_id: id, expand_more: 1 });
+    assert.equal(result.details.more.nodes.find((node) => node.children.includes('moremixk')).depth, 6);
+    assert.equal(result.details.expansion.stubs_resolved, 1);
+  });
+}
+
+for (const [index, replies] of [null, false, 1, 'broken', [], {}, { data: {} }, { data: { children: 'broken' } }].entries()) {
+  test(`malformed continuation replies ${index} retain the unresolved stub`, async () => {
+    const id = `badrep${index}`;
+    respond = (url) => {
+      if (!url.pathname.includes('/_/')) return ok(threadPayload(id, [deepComment('badrepp', `t3_${id}`, 5), more([], 't1_badrepp', 6)]));
+      const root = deepComment('badrepp', `t3_${id}`, 0); root.data.replies = replies;
+      return ok(threadPayload(id, [root]));
+    };
+    const result = await call('reddit_thread', { url_or_id: id, expand_more: 1 });
+    assert.ok(result.details.expansion_stopped);
+    assert.equal(result.details.comments_fetched, 1);
+    assert.equal(result.details.expansion.stubs_resolved, 0);
+    assert.deepEqual(result.details.expansion.unresolved_stubs, ['t1_badrepp']);
+  });
+}
+
+for (const [index, replies] of [undefined, '', listing([])].entries()) {
+  test(`valid empty continuation replies ${index} resolve without a failure`, async () => {
+    const id = `okreply${index}`;
+    respond = (url) => {
+      if (!url.pathname.includes('/_/')) return ok(threadPayload(id, [deepComment('okreplyp', `t3_${id}`, 5), more([], 't1_okreplyp', 6)]));
+      const root = deepComment('okreplyp', `t3_${id}`, 0); root.data.replies = replies;
+      return ok(threadPayload(id, [root]));
+    };
+    const result = await call('reddit_thread', { url_or_id: id, expand_more: 1 });
+    assert.equal(result.details.expansion_stopped, undefined);
+    assert.equal(result.details.expansion.stubs_resolved, 1);
+    assert.deepEqual(result.details.expansion.unresolved_stubs, []);
+  });
+}
 
 test('ordinary ids always outrank continuation stubs, including newly revealed ids', async () => {
   let batch = 0;
