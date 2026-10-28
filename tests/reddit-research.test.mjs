@@ -242,3 +242,16 @@ test('reddit_user respects cancellation instead of fetching remaining sections',
   await assert.rejects(() => tool.execute('cancel-test', tool.prepareArguments({ username: 'canceluser', sections: 'about,posts,comments' }), controller.signal), /cancelled-test/);
   assert.equal(requests.length - before, 1);
 });
+
+test('search and r/all listings use old.reddit.com while other endpoints stay on www', async () => {
+  respond = () => ok(listing([post('host001')]));
+  const hostFor = async (name, args) => {
+    const before = requests.length;
+    await call(name, args);
+    return requests.slice(before).map((u) => `${u.hostname}${u.pathname}`);
+  };
+  assert.deepEqual(await hostFor('reddit_search', { query: 'host-global' }), ['old.reddit.com/search.json']);
+  assert.deepEqual(await hostFor('reddit_search', { query: 'host-sub', subreddits: 'HostSub' }), ['old.reddit.com/r/HostSub/search.json']);
+  assert.deepEqual(await hostFor('reddit_trends', { subreddits: 'all', listing: 'hot', order: 'reddit' }), ['old.reddit.com/r/all/hot.json']);
+  assert.deepEqual(await hostFor('reddit_trends', { subreddits: 'HostSub', listing: 'hot' }), ['www.reddit.com/r/HostSub/hot.json']);
+});

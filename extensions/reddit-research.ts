@@ -569,8 +569,14 @@ function setCooldownFromResponse(response: Response) {
 	cooldownUntil = Math.max(cooldownUntil, Date.now() + cooldownSeconds * 1000);
 }
 
+// www.reddit.com answers 403 to search and r/all .json endpoints even with a valid session
+// cookie; old.reddit.com serves the same Listing JSON for them.
+const redditSearchHost = "old.reddit.com";
+const wwwBlockedPath = /(\/search\.json|^\/r\/all(\/[a-z]+)?\.json)$/i;
+
 function normalizeRequestUrl(path: string) {
 	const url = new URL(redditUrl(addRawJson(path)));
+	if (url.hostname === "www.reddit.com" && wwwBlockedPath.test(url.pathname)) url.hostname = redditSearchHost;
 	const params = [...url.searchParams.entries()].sort(([aKey, aVal], [bKey, bVal]) => {
 		const keyCmp = aKey.localeCompare(bKey);
 		return keyCmp || aVal.localeCompare(bVal);
